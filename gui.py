@@ -74,45 +74,40 @@ class SubtitleRemoverGUI:
         self._create_layout()
         # 创建窗口
         self.window = sg.Window(title='Video Subtitle Remover', layout=self.layout,
-                                icon=self.icon)
+                                icon=self.icon, finalize=True)
+        
         while True:
-            # 循环读取事件
             event, values = self.window.read(timeout=10)
-            # 处理【打开】事件
-            self._file_event_handler(event, values)
-            # 处理【滑动】事件
-            self._slide_event_handler(event, values)
-            # 处理【运行】事件
-            self._run_event_handler(event, values)
-            # 如果关闭软件，退出
+            
+            # 处理线程消息
+            if event == '-PRINT-':
+                print(values['-PRINT-'])
+            elif event == '-ERROR-':
+                print(f"Error: {values['-ERROR-']}")
+            elif event == '-PROGRESS-':
+                print(values['-PROGRESS-'])
+            
+            # 处理其他事件
             if event == sg.WIN_CLOSED:
                 break
+            self._file_event_handler(event, values)
+            self._slide_event_handler(event, values)
+            self._run_event_handler(event, values)
+            
             # 更新进度条
             if self.sr is not None:
-                self.window['-PROG-'].update(self.sr.progress_total)
-                if self.sr.preview_frame is not None:
-                    self.window['-DISPLAY-'].update(data=cv2.imencode('.png', self._img_resize(self.sr.preview_frame))[1].tobytes())
-                if self.sr.isFinished:
-                    # 1) 打开修改字幕滑块区域按钮
-                    self.window['-Y-SLIDER-'].update(disabled=False)
-                    self.window['-X-SLIDER-'].update(disabled=False)
-                    self.window['-Y-SLIDER-H-'].update(disabled=False)
-                    self.window['-X-SLIDER-W-'].update(disabled=False)
-                    # 2) 打开【运行】、【打开】和【识别语言】按钮
-                    self.window['-RUN-'].update(disabled=False)
-                    self.window['-FILE-'].update(disabled=False)
-                    self.window['-FILE_BTN-'].update(disabled=False)
-                    self.sr = None
-                if len(self.video_paths) >= 1:
-                    # 1) 关闭修改字幕滑块区域按钮
-                    self.window['-Y-SLIDER-'].update(disabled=True)
-                    self.window['-X-SLIDER-'].update(disabled=True)
-                    self.window['-Y-SLIDER-H-'].update(disabled=True)
-                    self.window['-X-SLIDER-W-'].update(disabled=True)
-                    # 2) 关闭【运行】、【打开】和【识别语言】按钮
-                    self.window['-RUN-'].update(disabled=True)
-                    self.window['-FILE-'].update(disabled=True)
-                    self.window['-FILE_BTN-'].update(disabled=True)
+                try:
+                    self.window['-PROG-'].update(self.sr.progress_total)
+                    if self.sr.preview_frame is not None:
+                        self.window['-DISPLAY-'].update(
+                            data=cv2.imencode('.png', self._img_resize(self.sr.preview_frame))[1].tobytes())
+                    if self.sr.isFinished:
+                        self._enable_buttons()
+                        self.sr = None
+                except Exception as e:
+                    print(f"Error updating progress: {str(e)}")
+
+        self.window.close()
 
     def _create_layout(self):
         """
@@ -246,19 +241,13 @@ class SubtitleRemoverGUI:
         self.window['-FILE_BTN-'].update(disabled=True)
 
     def _run_event_handler(self, event, values):
-        """
-        当点击运行按钮时：
-        1) 禁止修改字幕滑块区域
-        2) 禁止再次点击【运行】和【打开】按钮
-        3) 设定字幕区域位置
-        """
         if event == '-RUN-':
             if self.video_cap is None:
                 print('Please Open Video First')
             else:
                 # 禁用按钮
                 self.__disable_button()
-                # 3) 设定字幕区域位置
+                # 设定字幕区域位置
                 self.xmin = int(values['-X-SLIDER-'])
                 self.xmax = int(values['-X-SLIDER-'] + values['-X-SLIDER-W-'])
                 self.ymin = int(values['-Y-SLIDER-'])
@@ -267,37 +256,33 @@ class SubtitleRemoverGUI:
                     self.ymax = self.frame_height
                 if self.xmax > self.frame_width:
                     self.xmax = self.frame_width
-                if len(self.video_paths) <= 1:
-                    subtitle_area = (self.ymin, self.ymax, self.xmin, self.xmax)
-                else:
-                    print(f"{'Processing multiple videos or images'}")
-                    # 先判断每个视频的分辨率是否一致，一致的话设置相同的字幕区域，否则设置为None
-                    global_size = None
-                    for temp_video_path in self.video_paths:
-                        temp_cap = cv2.VideoCapture(temp_video_path)
-                        if global_size is None:
-                            global_size = (int(temp_cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(temp_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-                        else:
-                            temp_size = (int(temp_cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(temp_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-                            if temp_size != global_size:
-                                print('not all video/images in same size, processing in full screen')
-                                subtitle_area = None
-                    else:
-                        subtitle_area = (self.ymin, self.ymax, self.xmin, self.xmax)
-                y_p = self.ymin / self.frame_height
-                h_p = (self.ymax - self.ymin) / self.frame_height
-                x_p = self.xmin / self.frame_width
-                w_p = (self.xmax - self.xmin) / self.frame_width
-                self.set_subtitle_config(y_p, h_p, x_p, w_p)
+                
+                subtitle_area = self._get_subtitle_area(values)
+                self._save_subtitle_config()
 
                 def task():
-                    while self.video_paths:
-                        video_path = self.video_paths.pop()
-                        if subtitle_area is not None:
-                            print(f"{'SubtitleArea'}：({self.ymin},{self.ymax},{self.xmin},{self.xmax})")
-                        self.sr = backend.main.SubtitleRemover(video_path, subtitle_area, True)
-                        self.__disable_button()
-                        self.sr.run()
+                    try:
+                        while self.video_paths:
+                            video_path = self.video_paths.pop()
+                            if subtitle_area is not None:
+                                self.window.write_event_value('-PRINT-', 
+                                    f"SubtitleArea：({self.ymin},{self.ymax},{self.xmin},{self.xmax})")
+                            
+                            # 创建进度回调函数
+                            def progress_callback(message):
+                                self.window.write_event_value('-PROGRESS-', message)
+                            
+                            # 创建 SubtitleRemover 实例并传入回调函数
+                            self.sr = backend.main.SubtitleRemover(
+                                video_path, 
+                                subtitle_area, 
+                                True,
+                                progress_callback=progress_callback
+                            )
+                            self.sr.run()
+                    except Exception as e:
+                        self.window.write_event_value('-ERROR-', str(e))
+
                 Thread(target=task, daemon=True).start()
                 self.video_cap.release()
                 self.video_cap = None
@@ -385,6 +370,44 @@ class SubtitleRemoverGUI:
             except Exception:
                 self.set_subtitle_config(y_p, h_p, x_p, w_p)
                 return y_p, h_p, x_p, w_p
+
+    def _get_subtitle_area(self, values):
+        if len(self.video_paths) <= 1:
+            return (self.ymin, self.ymax, self.xmin, self.xmax)
+        
+        print("Processing multiple videos or images")
+        # 检查所有视频分辨率是否一致
+        global_size = None
+        for video_path in self.video_paths:
+            cap = cv2.VideoCapture(video_path)
+            size = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), 
+                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+            cap.release()
+            
+            if global_size is None:
+                global_size = size
+            elif size != global_size:
+                print('not all video/images in same size, processing in full screen')
+                return None
+        
+        return (self.ymin, self.ymax, self.xmin, self.xmax)
+
+    def _save_subtitle_config(self):
+        y_p = self.ymin / self.frame_height
+        h_p = (self.ymax - self.ymin) / self.frame_height
+        x_p = self.xmin / self.frame_width
+        w_p = (self.xmax - self.xmin) / self.frame_width
+        self.set_subtitle_config(y_p, h_p, x_p, w_p)
+
+    def _enable_buttons(self):
+        # 启用所有按钮
+        self.window['-Y-SLIDER-'].update(disabled=False)
+        self.window['-X-SLIDER-'].update(disabled=False)
+        self.window['-Y-SLIDER-H-'].update(disabled=False)
+        self.window['-X-SLIDER-W-'].update(disabled=False)
+        self.window['-RUN-'].update(disabled=False)
+        self.window['-FILE-'].update(disabled=False)
+        self.window['-FILE_BTN-'].update(disabled=False)
 
 
 if __name__ == '__main__':

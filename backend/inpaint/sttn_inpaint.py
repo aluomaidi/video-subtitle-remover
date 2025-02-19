@@ -252,7 +252,7 @@ class STTNVideoInpaint:
         else:
             self.clip_gap = clip_gap
 
-    def __call__(self, input_mask=None, input_sub_remover=None, tbar=None):
+    def __call__(self, input_mask=None, input_sub_remover=None, progress_callback=None):
         # 读取视频帧信息
         reader, frame_info = self.read_frame_info_from_video()
         if input_sub_remover is not None:
@@ -311,8 +311,8 @@ class STTNVideoInpaint:
                         frame[inpaint_area[k][0]:inpaint_area[k][1], :, :] = mask_area * comp + (1 - mask_area) * frame[inpaint_area[k][0]:inpaint_area[k][1], :, :]
                     writer.write(frame)
                     if input_sub_remover is not None:
-                        if tbar is not None:
-                            input_sub_remover.update_progress(tbar, increment=1)
+                        if progress_callback:
+                            progress_callback(j + start_f)
                         if original_frame is not None and input_sub_remover.gui_mode:
                             input_sub_remover.preview_frame = cv2.hconcat([original_frame, frame])
         # 释放视频写入对象
