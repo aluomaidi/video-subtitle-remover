@@ -878,10 +878,24 @@ if __name__ == '__main__':
     video_path = input(f"Please input video or image file path: ").strip()
     # 判断视频路径是不是一个目录，是目录的化，批量处理改目录下的所有视频文件
     # 2. 按以下顺序传入字幕区域
-    # sub_area = (ymin, ymax, xmin, xmax)
+    subtitle_area = None
+    area_input = input("是否需要指定字幕区域? (y/n): ").strip().lower()
+    if area_input == 'y':
+        try:
+            print("请按以下格式输入字幕区域坐标 (ymin ymax xmin xmax):")
+            print("例如: 400 450 100 500")
+            coords = input().strip().split()
+            if len(coords) == 4:
+                ymin, ymax, xmin, xmax = map(int, coords)
+                subtitle_area = (ymin, ymax, xmin, xmax)
+                print(f"设置字幕区域为: {subtitle_area}")
+            else:
+                print("坐标格式错误，将使用自动检测模式")
+        except ValueError:
+            print("输入格式错误，将使用自动检测模式")
     # 3. 新建字幕提取对象
     if is_video_or_image(video_path):
-        sd = SubtitleRemover(video_path, sub_area=None)
+        sd = SubtitleRemover(video_path, subtitle_area)
         sd.run()
     else:
         print(f'Invalid video path: {video_path}')
