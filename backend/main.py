@@ -72,7 +72,6 @@ class SubtitleDetect:
     def find_subtitle_frame_no(self, sub_remover=None):
         video_cap = cv2.VideoCapture(self.video_path)
         frame_count = video_cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        tbar = tqdm(total=int(frame_count), unit='frame', position=0, file=sys.__stdout__, desc='Subtitle Finding')
         current_frame_no = 0
         subtitle_frame_no_box_dict = {}
         print('[Processing] start finding subtitles...')
@@ -99,8 +98,9 @@ class SubtitleDetect:
                         temp_list.append((xmin, xmax, ymin, ymax))
                 if len(temp_list) > 0:
                     subtitle_frame_no_box_dict[current_frame_no] = temp_list
-            tbar.update(1)
+            # 删除 tbar.update(1)，改用 sub_remover 的进度更新
             if sub_remover:
+                sub_remover.update_progress(current_frame_no, int(frame_count), "Finding Subtitles")
                 sub_remover.progress_total = (100 * float(current_frame_no) / float(frame_count)) // 2
         subtitle_frame_no_box_dict = self.unify_regions(subtitle_frame_no_box_dict)
         # if config.UNITE_COORDINATES:
@@ -723,7 +723,8 @@ class SubtitleRemover:
                 cv2.imencode(self.ext, frame)[1].tofile(self.video_out_name)
             else:
                 self.video_writer.write(frame)
-            tbar.update(1)
+            # 删除 tbar.update(1) 改用 update_progress
+            self.update_progress(index, self.frame_count, "Processing")
             self.progress_remover = 100 * float(index) / float(self.frame_count) // 2
             self.progress_total = 50 + self.progress_remover
 
@@ -876,7 +877,7 @@ if __name__ == '__main__':
     multiprocessing.set_start_method("spawn")
     # 1. 提示用户输入视频路径
     video_path = input(f"Please input video or image file path: ").strip()
-    # 判断视频路径是不是一个目录，是目录的化，批量处理改目录下的所有视频文件
+    # 判断视频路径是不是一个目录，是目录的化，批量处理该目录下的所有视频文件
     # 2. 按以下顺序传入字幕区域
     subtitle_area = None
     area_input = input("是否需要指定字幕区域? (y/n): ").strip().lower()
