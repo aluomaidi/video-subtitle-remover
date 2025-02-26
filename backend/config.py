@@ -75,7 +75,7 @@ MODE可选算法类型
 - InpaintMode.PROPAINTER 算法： 需要消耗大量显存，速度较慢，对运动非常剧烈的视频效果较好
 """
 # 【设置inpaint算法】
-MODE = InpaintMode.STTN
+MODE = InpaintMode.LAMA
 # 【设置像素点偏差】
 # 用于判断是不是非字幕区域(一般认为字幕文本框的长度是要大于宽度的，如果字幕框的高大于宽，且大于的幅度超过指定像素点大小，则认为是错误检测)
 THRESHOLD_HEIGHT_WIDTH_DIFFERENCE = 10
@@ -130,4 +130,7 @@ PROPAINTER_MAX_LOAD_NUM = 70
 # 是否开启极速模式，开启后不保证inpaint效果，仅仅对包含文本的区域文本进行去除
 LAMA_SUPER_FAST = False
 # ×××××××××× InpaintMode.LAMA算法设置 end ××××××××××
+
+# 添加一个配置选项，控制是否跳过文本检测
+SKIP_TEXT_DETECTION = True  # 默认跳过文本检测，直接使用用户指定的区域
 # ×××××××××××××××××××× [可以改] end ××××××××××××××××××××

@@ -6,6 +6,10 @@ from pathlib import Path
 import threading
 import cv2
 import sys
+import numpy as np
+import time
+import logging
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,7 +26,6 @@ import platform
 import tempfile
 import multiprocessing
 from shapely.geometry import Polygon
-import time
 from tqdm import tqdm
 from tools.infer import utility
 from tools.infer.predict_det import TextDetector
@@ -508,15 +511,46 @@ class SubtitleDetect:
         return correct_subtitle_frame_no_box_dict
 
 
+# 配置日志
+def setup_logger():
+    log_format = '%(asctime)s - %(levelname)s - %(message)s'
+    date_format = '%Y-%m-%d %H:%M:%S'
+    log_file = f'subtitle_remover_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format=log_format,
+        datefmt=date_format,
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    return logging.getLogger('SubtitleRemover')
+
 class SubtitleRemover:
     def __init__(self, video_path, subtitle_area, preview=False, progress_callback=None):
         importlib.reload(config)
+        # 设置日志记录器
+        self.logger = setup_logger()
+        self.logger.info(f"初始化字幕去除器，处理文件: {video_path}")
+        self.logger.info(f"使用配置: MODE={config.MODE}, SKIP_TEXT_DETECTION={config.SKIP_TEXT_DETECTION}")
+        
+        # 记录开始时间
+        self.start_time = time.time()
+        self.step_times = {}
+        
         # 线程锁
         self.lock = threading.RLock()
         self.video_path = video_path
         self.sub_area = subtitle_area
         self.gui_mode = preview
         self.progress_callback = progress_callback
+        
+        # 记录字幕区域
+        if subtitle_area:
+            self.logger.info(f"指定字幕区域: {subtitle_area}")
+        
         # 判断是否为图片
         self.is_picture = False
         if is_image_file(str(video_path)):
@@ -540,8 +574,34 @@ class SubtitleRemover:
         self.sub_detector = SubtitleDetect(self.video_path, self.sub_area)
         # 创建视频临时对象，windows下delete=True会有permission denied的报错
         self.video_temp_file = tempfile.NamedTemporaryFile(suffix='.mp4', delete=False)
-        # 创建视频写对象
-        self.video_writer = cv2.VideoWriter(self.video_temp_file.name, cv2.VideoWriter_fourcc(*'mp4v'), self.fps, self.size)
+        # 创建视频写对象 - 修改编码器为更兼容的选项
+        if platform.system() == 'Darwin':  # macOS
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264编码
+        else:  # Windows和Linux
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # MPEG-4编码
+        
+        self.video_writer = cv2.VideoWriter(
+            self.video_temp_file.name, 
+            fourcc, 
+            self.fps, 
+            self.size
+        )
+        
+        # 检查视频写入器是否成功初始化
+        if not self.video_writer.isOpened():
+            print("警告：视频写入器初始化失败，尝试备用编码器")
+            # 尝试备用编码器
+            backup_fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            self.video_temp_file = tempfile.NamedTemporaryFile(suffix='.avi', delete=False)
+            self.video_writer = cv2.VideoWriter(
+                self.video_temp_file.name,
+                backup_fourcc,
+                self.fps,
+                self.size
+            )
+            if not self.video_writer.isOpened():
+                print("错误：所有视频写入器初始化都失败")
+        
         self.video_out_name = os.path.join(os.path.dirname(self.video_path), f'{self.vd_name}_no_sub.mp4')
         self.video_inpaint = None
         self.lama_inpaint = None
@@ -561,6 +621,15 @@ class SubtitleRemover:
         self.preview_frame = None
         # 是否将原音频嵌入到去除字幕后的视频
         self.is_successful_merged = False
+
+    def _time_it(self, step_name):
+        """记录步骤耗时"""
+        current_time = time.time()
+        if hasattr(self, 'last_step_time'):
+            elapsed = current_time - self.last_step_time
+            self.step_times[step_name] = elapsed
+            self.logger.info(f"步骤 '{step_name}' 耗时: {elapsed:.2f}秒")
+        self.last_step_time = current_time
 
     def update_progress(self, current, total, desc=""):
         """更新进度的统一接口"""
@@ -699,36 +768,186 @@ class SubtitleRemover:
         self.sttn_mode_with_no_detection()
 
     def lama_mode(self):
-        print('use lama mode')
-        sub_list = self.sub_detector.find_subtitle_frame_no(sub_remover=self)
+        self.logger.info("使用LAMA模式进行字幕去除")
+        self._time_it("初始化")
+        
+        # 检查是否使用用户指定的字幕区域
+        if self.sub_area is not None and config.SKIP_TEXT_DETECTION:
+            self.logger.info('使用用户指定的字幕区域，跳过文本检测')
+            # 创建一个包含所有帧的字典，每帧都使用相同的字幕区域
+            sub_list = {}
+            # 获取视频总帧数
+            total_frames = int(self.frame_count)
+            # 将用户指定的区域应用到所有帧
+            for i in range(1, total_frames + 1):
+                # 将sub_area转换为[(xmin, xmax, ymin, ymax)]格式
+                s_ymin, s_ymax, s_xmin, s_xmax = self.sub_area
+                sub_list[i] = [(s_xmin, s_xmax, s_ymin, s_ymax)]
+            self.logger.info(f"为{total_frames}帧创建了字幕区域映射")
+        else:
+            # 原有的自动文本检测逻辑
+            self.logger.info("开始自动文本检测")
+            detect_start = time.time()
+            sub_list = self.sub_detector.find_subtitle_frame_no(sub_remover=self)
+            self.logger.info(f"文本检测完成，检测到{len(sub_list)}帧包含字幕，耗时: {time.time() - detect_start:.2f}秒")
+        
+        self._time_it("文本检测")
+        
         if self.lama_inpaint is None:
+            self.logger.info("初始化LAMA修复模型")
+            model_start = time.time()
             self.lama_inpaint = LamaInpaint()
+            self.logger.info(f"LAMA模型加载完成，耗时: {time.time() - model_start:.2f}秒")
+        
+        self._time_it("模型加载")
+        
         index = 0
-        print('[Processing] start removing subtitles...')
+        frames_with_subtitle = 0
+        inpaint_time_total = 0
+        
+        self.logger.info('[Processing] 开始去除字幕...')
+        
         while True:
             ret, frame = self.video_cap.read()
             if not ret:
                 break
-            original_frame = frame
+            original_frame = frame.copy()
             index += 1
+            
             if index in sub_list.keys():
+                frames_with_subtitle += 1
                 mask = create_mask(self.mask_size, sub_list[index])
+                
+                inpaint_start = time.time()
                 if config.LAMA_SUPER_FAST:
                     frame = cv2.inpaint(frame, mask, 3, cv2.INPAINT_TELEA)
                 else:
                     frame = self.lama_inpaint(frame, mask)
+                inpaint_time = time.time() - inpaint_start
+                inpaint_time_total += inpaint_time
+                
+                if index % 100 == 0:
+                    self.logger.info(f"处理第{index}帧，修复耗时: {inpaint_time:.4f}秒")
+            
             if self.gui_mode:
                 self.preview_frame = cv2.hconcat([original_frame, frame])
+            
             if self.is_picture:
                 cv2.imencode(self.ext, frame)[1].tofile(self.video_out_name)
             else:
                 self.video_writer.write(frame)
-            # 删除 tbar.update(1) 改用 update_progress
+            
             self.update_progress(index, self.frame_count, "Processing")
             self.progress_remover = 100 * float(index) / float(self.frame_count) // 2
             self.progress_total = 50 + self.progress_remover
+        
+        self._time_it("帧处理")
+        
+        avg_inpaint_time = inpaint_time_total / frames_with_subtitle if frames_with_subtitle > 0 else 0
+        self.logger.info(f"处理完成: 总帧数={index}, 包含字幕帧数={frames_with_subtitle}")
+        self.logger.info(f"平均每帧修复耗时: {avg_inpaint_time:.4f}秒")
+
+    def merge_audio_to_video(self):
+        # 创建音频临时对象，windows下delete=True会有permission denied的报错
+        temp = tempfile.NamedTemporaryFile(suffix='.aac', delete=False)
+        audio_extract_command = [config.FFMPEG_PATH,
+                                 "-y", "-i", self.video_path,
+                                 "-acodec", "copy",
+                                 "-vn", "-loglevel", "error", temp.name]
+        use_shell = True if os.name == "nt" else False
+        try:
+            subprocess.check_output(audio_extract_command, stdin=open(os.devnull), shell=use_shell)
+        except Exception as e:
+            print(f'音频提取失败: {str(e)}')
+            return
+        else:
+            if os.path.exists(self.video_temp_file.name) and os.path.getsize(self.video_temp_file.name) > 0:
+                # 确保视频写入器已关闭
+                if self.video_writer and self.video_writer.isOpened():
+                    self.video_writer.release()
+                    
+                # 使用ffmpeg直接合并视频和音频
+                audio_merge_command = [
+                    config.FFMPEG_PATH,
+                    "-y", 
+                    "-i", self.video_temp_file.name,
+                    "-i", temp.name,
+                    "-c:v", "copy",  # 直接复制视频流，不重新编码
+                    "-c:a", "aac",   # 使用AAC编码音频
+                    "-strict", "experimental",
+                    "-shortest",     # 使用最短的流长度
+                    "-loglevel", "error", 
+                    self.video_out_name
+                ]
+                
+                try:
+                    subprocess.check_output(audio_merge_command, stdin=open(os.devnull), shell=use_shell)
+                    if os.path.exists(self.video_out_name) and os.path.getsize(self.video_out_name) > 0:
+                        self.is_successful_merged = True
+                        print(f'音频合并成功，输出文件: {self.video_out_name}')
+                    else:
+                        print('音频合并失败，输出文件为空或不存在')
+                        # 尝试不同的合并方法
+                        self._try_alternative_merge(temp.name)
+                except Exception as e:
+                    print(f'音频合并失败: {str(e)}')
+                    # 尝试不同的合并方法
+                    self._try_alternative_merge(temp.name)
+            else:
+                print('临时视频文件不存在或为空，无法合并音频')
+            
+            # 清理临时音频文件
+            if os.path.exists(temp.name):
+                try:
+                    os.remove(temp.name)
+                except Exception:
+                    if platform.system() != 'Windows':
+                        print(f'无法删除临时文件 {temp.name}')
+                
+            # 如果所有合并方法都失败，直接复制临时视频文件
+            if not self.is_successful_merged and os.path.exists(self.video_temp_file.name) and os.path.getsize(self.video_temp_file.name) > 0:
+                try:
+                    print('音频合并失败，尝试直接复制视频文件')
+                    shutil.copy2(self.video_temp_file.name, self.video_out_name)
+                    if os.path.exists(self.video_out_name) and os.path.getsize(self.video_out_name) > 0:
+                        print(f'视频文件复制成功: {self.video_out_name}')
+                except IOError as e:
+                    print(f"无法复制文件: {str(e)}")
+            
+            # 关闭临时文件
+            self.video_temp_file.close()
+
+    def _try_alternative_merge(self, audio_file):
+        """尝试替代方法合并音频和视频"""
+        try:
+            # 尝试使用不同的编码参数
+            alt_merge_command = [
+                config.FFMPEG_PATH,
+                "-y", 
+                "-i", self.video_temp_file.name,
+                "-i", audio_file,
+                "-c:v", "libx264",  # 使用H.264重新编码视频
+                "-c:a", "aac",      # 使用AAC编码音频
+                "-strict", "experimental",
+                "-b:a", "192k",     # 设置音频比特率
+                "-shortest",        # 使用最短的流长度
+                "-loglevel", "error", 
+                self.video_out_name
+            ]
+            
+            use_shell = True if os.name == "nt" else False
+            subprocess.check_output(alt_merge_command, stdin=open(os.devnull), shell=use_shell)
+            
+            if os.path.exists(self.video_out_name) and os.path.getsize(self.video_out_name) > 0:
+                self.is_successful_merged = True
+                print(f'使用替代方法成功合并音频，输出文件: {self.video_out_name}')
+            else:
+                print('替代合并方法失败')
+        except Exception as e:
+            print(f'替代合并方法失败: {str(e)}')
 
     def run(self):
+        self.logger.info("开始执行字幕去除任务")
         start_time = time.time()
         self.progress_total = 0
         
@@ -739,20 +958,28 @@ class SubtitleRemover:
                 if config.MODE == config.InpaintMode.PROPAINTER:
                     self.propainter_mode()
                 elif config.MODE == config.InpaintMode.STTN:
-                    self.sttn_mode()  # 不再需要传递tbar参数
+                    self.sttn_mode()
                 else:
                     self.lama_mode()
-                    
-            if not self.is_picture:
-                self.merge_audio_to_video()
-                print(f"[Finished] Subtitle successfully removed, video generated at: {self.video_out_name}")
-            else:
-                print(f"[Finished] Subtitle successfully removed, picture generated at: {self.video_out_name}")
                 
-            print(f'Time cost: {round(time.time() - start_time, 2)}s')
+                if not self.is_picture:
+                    merge_start = time.time()
+                    self.merge_audio_to_video()
+                    self.logger.info(f"音频合并耗时: {time.time() - merge_start:.2f}秒")
+                    self.logger.info(f"[Finished] 字幕成功去除，视频生成于: {self.video_out_name}")
+            
+            total_time = time.time() - start_time
+            self.logger.info(f'总耗时: {total_time:.2f}秒')
+            
+            # 打印各步骤耗时统计
+            self.logger.info("各步骤耗时统计:")
+            for step, elapsed in self.step_times.items():
+                self.logger.info(f"  - {step}: {elapsed:.2f}秒 ({elapsed/total_time*100:.1f}%)")
             
         except Exception as e:
-            print(f"Error during processing: {str(e)}")
+            self.logger.error(f"处理过程中出错: {str(e)}")
+            import traceback
+            self.logger.error(traceback.format_exc())
             raise
         finally:
             self.cleanup()
@@ -771,50 +998,6 @@ class SubtitleRemover:
             except Exception:
                 if platform.system() != 'Windows':
                     print(f'Failed to delete temp file {self.video_temp_file.name}')
-
-    def merge_audio_to_video(self):
-        # 创建音频临时对象，windows下delete=True会有permission denied的报错
-        temp = tempfile.NamedTemporaryFile(suffix='.aac', delete=False)
-        audio_extract_command = [config.FFMPEG_PATH,
-                                 "-y", "-i", self.video_path,
-                                 "-acodec", "copy",
-                                 "-vn", "-loglevel", "error", temp.name]
-        use_shell = True if os.name == "nt" else False
-        try:
-            subprocess.check_output(audio_extract_command, stdin=open(os.devnull), shell=use_shell)
-        except Exception:
-            print('fail to extract audio')
-            return
-        else:
-            if os.path.exists(self.video_temp_file.name):
-                audio_merge_command = [config.FFMPEG_PATH,
-                                       "-y", "-i", self.video_temp_file.name,
-                                       "-i", temp.name,
-                                       "-vcodec", "libx264" if config.USE_H264 else "copy",
-                                       "-acodec", "copy",
-                                       "-loglevel", "error", self.video_out_name]
-                try:
-                    subprocess.check_output(audio_merge_command, stdin=open(os.devnull), shell=use_shell)
-                except Exception:
-                    print('fail to merge audio')
-                    return
-            if os.path.exists(temp.name):
-                try:
-                    os.remove(temp.name)
-                except Exception:
-                    if platform.system() in ['Windows']:
-                        pass
-                    else:
-                        print(f'failed to delete temp file {temp.name}')
-            self.is_successful_merged = True
-        finally:
-            temp.close()
-            if not self.is_successful_merged:
-                try:
-                    shutil.copy2(self.video_temp_file.name, self.video_out_name)
-                except IOError as e:
-                    print("Unable to copy file. %s" % e)
-            self.video_temp_file.close()
 
     def _process_image(self):
         sub_list = self.sub_detector.find_subtitle_frame_no(sub_remover=self)
