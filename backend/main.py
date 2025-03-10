@@ -602,7 +602,10 @@ class SubtitleRemover:
             if not self.video_writer.isOpened():
                 print("错误：所有视频写入器初始化都失败")
         
-        self.video_out_name = os.path.join(os.path.dirname(self.video_path), f'{self.vd_name}_no_sub.mp4')
+        # 获取模型名称用于输出文件命名
+        model_name = self._get_model_name()
+        
+        self.video_out_name = os.path.join(os.path.dirname(self.video_path), f'{self.vd_name}_no_sub_{model_name}.mp4')
         self.video_inpaint = None
         self.lama_inpaint = None
         self.ext = os.path.splitext(video_path)[-1]
@@ -610,7 +613,7 @@ class SubtitleRemover:
             pic_dir = os.path.join(os.path.dirname(self.video_path), 'no_sub')
             if not os.path.exists(pic_dir):
                 os.makedirs(pic_dir)
-            self.video_out_name = os.path.join(pic_dir, f'{self.vd_name}{self.ext}')
+            self.video_out_name = os.path.join(pic_dir, f'{self.vd_name}_no_sub_{model_name}{self.ext}')
         if torch.cuda.is_available():
             print('use GPU for acceleration')
         # 总处理进度
@@ -621,6 +624,18 @@ class SubtitleRemover:
         self.preview_frame = None
         # 是否将原音频嵌入到去除字幕后的视频
         self.is_successful_merged = False
+
+    def _get_model_name(self):
+        """根据当前配置获取模型名称"""
+        if config.MODE == config.InpaintMode.PROPAINTER:
+            return "propainter"
+        elif config.MODE == config.InpaintMode.STTN:
+            return "sttn"
+        else:
+            if config.LAMA_SUPER_FAST:
+                return "lama_fast"
+            else:
+                return "lama"
 
     def _time_it(self, step_name):
         """记录步骤耗时"""
