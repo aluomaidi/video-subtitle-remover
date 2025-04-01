@@ -78,45 +78,33 @@ class SubtitleDetect:
         current_frame_no = 0
         subtitle_frame_no_box_dict = {}
         print('[Processing] start finding subtitles...')
-        while video_cap.isOpened():
-            ret, frame = video_cap.read()
-            # 如果读取视频帧失败（视频读到最后一帧）
-            if not ret:
-                break
-            # 读取视频帧成功
-            current_frame_no += 1
-            dt_boxes, elapse = self.detect_subtitle(frame)
-            coordinate_list = self.get_coordinates(dt_boxes.tolist())
-            if coordinate_list:
-                temp_list = []
-                for coordinate in coordinate_list:
-                    xmin, xmax, ymin, ymax = coordinate
-                    if self.sub_area is not None:
-                        s_ymin, s_ymax, s_xmin, s_xmax = self.sub_area
-                        if (s_xmin <= xmin and xmax <= s_xmax
-                                and s_ymin <= ymin
-                                and ymax <= s_ymax):
-                            temp_list.append((xmin, xmax, ymin, ymax))
-                    else:
-                        temp_list.append((xmin, xmax, ymin, ymax))
-                if len(temp_list) > 0:
-                    subtitle_frame_no_box_dict[current_frame_no] = temp_list
-            # 删除 tbar.update(1)，改用 sub_remover 的进度更新
-            if sub_remover:
-                sub_remover.update_progress(current_frame_no, int(frame_count), "Finding Subtitles")
-                sub_remover.progress_total = (100 * float(current_frame_no) / float(frame_count)) // 2
+        
+        # 如果指定了字幕区域，直接使用该区域
+        if self.sub_area is not None:
+            s_ymin, s_ymax, s_xmin, s_xmax = self.sub_area
+            # 为每一帧使用相同的字幕区域
+            while video_cap.isOpened():
+                ret, frame = video_cap.read()
+                if not ret:
+                    break
+                current_frame_no += 1
+                subtitle_frame_no_box_dict[current_frame_no] = [(s_xmin, s_xmax, s_ymin, s_ymax)]
+        else:
+            # 如果没有指定字幕区域，则进行文本检测
+            while video_cap.isOpened():
+                ret, frame = video_cap.read()
+                if not ret:
+                    break
+                current_frame_no += 1
+                dt_boxes, elapse = self.detect_subtitle(frame)
+                coordinate_list = self.get_coordinates(dt_boxes.tolist())
+                if coordinate_list:
+                    subtitle_frame_no_box_dict[current_frame_no] = coordinate_list
+                if sub_remover:
+                    sub_remover.update_progress(current_frame_no, int(frame_count), "Finding Subtitles")
+                    sub_remover.progress_total = (100 * float(current_frame_no) / float(frame_count)) // 2
+        
         subtitle_frame_no_box_dict = self.unify_regions(subtitle_frame_no_box_dict)
-        # if config.UNITE_COORDINATES:
-        #     subtitle_frame_no_box_dict = self.get_subtitle_frame_no_box_dict_with_united_coordinates(subtitle_frame_no_box_dict)
-        #     if sub_remover is not None:
-        #         try:
-        #             # 当帧数大于1时，说明并非图片或单帧
-        #             if sub_remover.frame_count > 1:
-        #                 subtitle_frame_no_box_dict = self.filter_mistake_sub_area(subtitle_frame_no_box_dict,
-        #                                                                           sub_remover.fps)
-        #         except Exception:
-        #             pass
-        #     subtitle_frame_no_box_dict = self.prevent_missed_detection(subtitle_frame_no_box_dict)
         print('[Finished] Finished finding subtitles...')
         new_subtitle_frame_no_box_dict = dict()
         for key in subtitle_frame_no_box_dict.keys():
